@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.xspf
+*.mp3
+*.flac
+.venv/
+.idea/
+.vscode/
