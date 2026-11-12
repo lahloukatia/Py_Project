@@ -8,6 +8,8 @@ Exemples :
     python3 cli.py -e music.mp3 -s titre="Mon titre" -s genre=Rock
     python3 cli.py -e music.mp3            (édition interactive)
     python3 cli.py -a music.mp3            (infos de l'album + paroles via API Web)
+    python3 cli.py -p music.mp3            (écouter un morceau)
+    python3 cli.py -p playlist.xspf        (écouter une playlist enregistrée)
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from library.metadata import MetadataError, extract_metadata  # noqa: E402
 from library.tags import TAG_LABELS, TagError, current_tags, parse_assignments, write_tags  # noqa: E402
 from library.webapi import WebApiError, fetch_album_info  # noqa: E402
 from library.playlist import DEFAULT_PLAYLIST_NAME, save_playlist, tracks_from_paths  # noqa: E402
+from library.player import PlayerError, play_file, play_playlist  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("-a", "--album", metavar="FICHIER",
                         help="chercher les infos complètes de l'album du fichier "
                              "(pistes, paroles) via une API Web")
+    source.add_argument("-p", "--play", metavar="FICHIER",
+                        help="écouter un fichier MP3/FLAC ou une playlist .xspf enregistrée")
     parser.add_argument("-s", "--set", metavar="CLE=VALEUR", action="append",
                         help="tag à modifier avec -e (répétable). Clés : titre, artiste, album, "
                              "artiste_album, date, genre, piste. Valeur vide = suppression")
@@ -151,13 +156,37 @@ def run_album(path: str, with_lyrics: bool) -> int:
     return 0
 
 
+def run_play(path: str) -> int:
+    """Option -p : joue un morceau MP3/FLAC ou une playlist XSPF.
+
+    Renvoie 0 si tout s'est bien passé, 1 en cas d'erreur (fichier, son, pygame...).
+    Ctrl+C arrête la lecture proprement.
+    """
+    try:
+        if path.lower().endswith(".xspf"):
+            if not os.path.isfile(path):
+                print(f"Erreur : playlist introuvable : {path}", file=sys.stderr)
+                return 1
+            count = play_playlist(path)
+            print(f"\nFin de la playlist ({count} morceau(x) joué(s)).")
+        else:
+            play_file(path)
+            print("Fin du morceau.")
+    except (MetadataError, PlayerError) as exc:
+        print(f"Erreur : {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nLecture arrêtée.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not any((args.file, args.directory, args.edit, args.album)):
+    if not any((args.file, args.directory, args.edit, args.album, args.play)):
         print("Erreur : aucun paramètre fourni (utiliser -f FICHIER, -d DOSSIER, "
-              "-e FICHIER ou -a FICHIER).\n"
+              "-e FICHIER, -a FICHIER ou -p FICHIER).\n"
               "Tapez « python3 cli.py -h » pour obtenir de l'aide.", file=sys.stderr)
         return 2
     if args.output and not args.directory:
@@ -171,6 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_file(args.file)
     if args.edit:
         return run_edit(args.edit, args.set)
+    if args.play:
+        return run_play(args.play)
     if args.album:
         return run_album(args.album, not args.no_lyrics)
     return run_directory(args.directory, args.output)
