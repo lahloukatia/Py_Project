@@ -7,7 +7,8 @@ Exemples :
     python3 cli.py -d ./music/ -o playlist.xspf
     python3 cli.py -e music.mp3 -s titre="Mon titre" -s genre=Rock
     python3 cli.py -e music.mp3            (édition interactive)
-    python3 cli.py -a music.mp3            (infos de l'album + paroles via API Web)
+    python3 cli.py -a music.mp3            (infos de l'album + paroles du morceau via API Web)
+    python3 cli.py -a music.mp3 -t 1,8     (paroles des pistes 1 et 8 de l'album)
     python3 cli.py -p music.mp3            (écouter un morceau)
     python3 cli.py -p playlist.xspf        (écouter une playlist enregistrée)
 """
@@ -49,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-s", "--set", metavar="CLE=VALEUR", action="append",
                         help="tag à modifier avec -e (on peut en mettre plusieurs). Clés : titre, "
                              "artiste, album, artiste_album, date, genre, piste. Valeur vide = suppression")
+    parser.add_argument("-t", "--titres", metavar="NUMEROS",
+                        help="avec -a : numéros des pistes dont on veut les paroles, ex. -t 1,8 "
+                             "(par défaut : seulement le morceau du fichier)")
     parser.add_argument("--no-lyrics", action="store_true",
                         help="avec -a : ne pas télécharger les paroles")
     parser.add_argument("-o", "--output", metavar="FICHIER.xspf",
@@ -131,9 +135,35 @@ def run_edit(path, options_s):
     return 0
 
 
-def run_album(path, avec_paroles):
+def choisir_pistes(album, meta, titres):
+    """Renvoie la liste des pistes dont on veut afficher les paroles.
+
+    titres : texte donné avec -t, par exemple "1,8". Sans -t, on prend seulement
+    le morceau du fichier (même titre que dans ses tags).
+    """
+    pistes = album["pistes"]
+    if titres:
+        choisies = []
+        for numero in titres.split(","):
+            numero = numero.strip()
+            if numero.isdigit() and 1 <= int(numero) <= len(pistes):
+                choisies.append(pistes[int(numero) - 1])
+            else:
+                print(f"Piste ignorée : {numero} (l'album a {len(pistes)} pistes)", file=sys.stderr)
+        return choisies
+
+    if not meta.title:
+        return []
+    for piste in pistes:
+        if piste["titre"].lower() == meta.title.lower():
+            return [piste]
+    # titre écrit un peu différemment dans l'album : on cherche quand même ses paroles
+    return [{"numero": 0, "titre": meta.title}]
+
+
+def run_album(path, avec_paroles, titres=None):
     """Option -a : lit l'album et l'artiste dans les tags du fichier,
-    puis affiche les infos de l'album trouvées sur Internet (et les paroles)."""
+    puis affiche les infos de l'album trouvées sur Internet (et les paroles demandées)."""
     try:
         meta = extract_metadata(path)
         if not meta.album:
@@ -141,7 +171,7 @@ def run_album(path, avec_paroles):
                   "Ajoutez-le avec : python3 cli.py -e FICHIER -s album=\"...\"", file=sys.stderr)
             return 1
         artiste = meta.album_artist or meta.artist
-        print(f"Recherche de {meta.album} ({artiste or 'artiste inconnu'})...\n")
+        print(f"Recherche de {meta.album} ({artiste or 'artiste inconnu'})...\n", flush=True)
         album = chercher_album(artiste, meta.album)
     except (MetadataError, WebApiError) as e:
         print(f"Erreur : {e}", file=sys.stderr)
@@ -158,11 +188,18 @@ def run_album(path, avec_paroles):
         minutes, secondes = divmod(piste["duree"], 60)
         print(f"  {piste['numero']:>2}. {piste['titre']} [{minutes}:{secondes:02d}]")
 
-    if avec_paroles:
-        for piste in album["pistes"]:
-            print(f"\n--- {piste['numero']}. {piste['titre']} ---")
-            paroles = chercher_paroles(album["artiste"], piste["titre"])
-            print(paroles or "(paroles introuvables)")
+    if not avec_paroles:
+        return 0
+    pistes = choisir_pistes(album, meta, titres)
+    if not pistes:
+        print("\nPour voir des paroles, choisissez des pistes avec -t, par exemple : -t 1,3")
+    for piste in pistes:
+        if piste["numero"]:
+            print(f"\n--- Paroles de {piste['numero']}. {piste['titre']} ---")
+        else:
+            print(f"\n--- Paroles de {piste['titre']} ---")
+        paroles = chercher_paroles(album["artiste"], piste["titre"])
+        print(paroles or "(paroles introuvables)")
     return 0
 
 
@@ -205,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.set and not args.edit:
         print("Erreur : -s ne s'utilise qu'avec -e.", file=sys.stderr)
         return 2
+    if args.titres and not args.album:
+        print("Erreur : -t ne s'utilise qu'avec -a.", file=sys.stderr)
+        return 2
 
     if args.file:
         return run_file(args.file)
@@ -213,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.play:
         return run_play(args.play)
     if args.album:
-        return run_album(args.album, not args.no_lyrics)
+        return run_album(args.album, not args.no_lyrics, args.titres)
     return run_directory(args.directory, args.output)
 
 
