@@ -79,6 +79,8 @@ def modifier_tags(path, changements):
         raise TagError(f"Fichier introuvable : {path}")
     if not path.lower().endswith((".mp3", ".flac")):
         raise TagError(f"Format non supporté (MP3 ou FLAC attendu) : {path}")
+    if not os.access(path, os.W_OK):
+        raise TagError(f"Fichier en lecture seule, impossible de le modifier : {path}")
 
     # on vérifie tout avant d'écrire, pour ne pas modifier le fichier à moitié
     for nom, valeur in changements.items():

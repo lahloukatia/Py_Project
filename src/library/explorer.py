@@ -72,6 +72,8 @@ def explore(directory):
     Les fichiers et dossiers cachés (nom commençant par un point) sont ignorés.
     Lève NotADirectoryError si le dossier n'existe pas.
     """
+    if os.path.isfile(directory):
+        raise NotADirectoryError(f"Ce n'est pas un dossier mais un fichier : {directory}")
     if not os.path.isdir(directory):
         raise NotADirectoryError(f"Dossier introuvable : {directory}")
 

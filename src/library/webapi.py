@@ -24,7 +24,8 @@ def get_json(url, parametres):
     url = url + "?" + urllib.parse.urlencode(parametres)
     requete = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
 
-    # MusicBrainz répond parfois 503 quand il est surchargé : on réessaie jusqu'à 5 fois
+    # MusicBrainz répond parfois 503 quand il est surchargé, ou met trop de temps à répondre :
+    # dans ces deux cas on attend 2 secondes et on réessaie, jusqu'à 5 fois
     for essai in range(5):
         try:
             with urllib.request.urlopen(requete, timeout=10) as reponse:
@@ -36,12 +37,25 @@ def get_json(url, parametres):
                 time.sleep(2)
                 continue
             raise WebApiError(f"Erreur HTTP {e.code}")
-        except urllib.error.URLError:
-            raise WebApiError("Connexion impossible, vérifiez votre accès Internet.")
+        except (urllib.error.URLError, TimeoutError):
+            if essai < 4:
+                time.sleep(2)
+                continue
+            raise WebApiError("Connexion impossible ou serveur trop lent, vérifiez votre accès Internet.")
 
 
 def chercher_album(artiste, album):
     """Cherche l'album sur MusicBrainz et renvoie un dictionnaire avec ses infos et ses pistes."""
+    # on enlève les guillemets, qui ont un sens spécial dans la recherche MusicBrainz
+    album = album.replace('"', "")
+    artiste = (artiste or "").replace('"', "")
+
+    # "Daft Punk feat. Pharrell Williams" -> "Daft Punk" : on garde l'artiste principal
+    for mot in (" feat", " ft."):
+        position = artiste.lower().find(mot)
+        if position != -1:
+            artiste = artiste[:position]
+
     # 1) recherche de l'album : on récupère l'identifiant du meilleur résultat
     requete = f'release:"{album}"'
     if artiste:
@@ -49,7 +63,7 @@ def chercher_album(artiste, album):
     resultats = get_json("https://musicbrainz.org/ws/2/release/",
                          {"query": requete, "limit": 1, "fmt": "json"})
     if not resultats or not resultats.get("releases"):
-        raise WebApiError(f"Aucun album trouvé pour {album} ({artiste})")
+        raise WebApiError(f"Aucun album trouvé pour {album} ({artiste or 'artiste inconnu'})")
     identifiant = resultats["releases"][0]["id"]
 
     time.sleep(1)  # règle de MusicBrainz : une requête par seconde maximum
