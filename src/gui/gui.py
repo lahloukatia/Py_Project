@@ -1,21 +1,27 @@
+"""Interface graphique du projet MP3/FLAC.
+
+Lancement depuis la racine du dépôt : python3 src/gui/gui.py
+Dépendances : mutagen, pygame ; Pillow facultatif pour afficher les pochettes.
+"""
+from __future__ import annotations
+
 import os
 import sys
+import threading
 import tkinter as tk
-from tkinter import messagebox
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+import webbrowser
 
-# Accès aux modules du projet
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from library.explorer import scan_directory
-from library.metadata import extract_metadata, is_supported_file, MetadataError
-from library.playlist import (
-    DEFAULT_PLAYLIST_NAME,
-    load_playlist,
-    save_playlist,
-    tracks_from_paths,
-)
+from library import explorer
+from library.metadata import MetadataError, extract_metadata
+from library.playlist import load_playlist, save_playlist, tracks_from_paths
+from library.tags import TAG_LABELS, TagError, current_tags, write_tags
+from library.webapi import fetch_album_info
+from library.player import AudioPlayer, PlayerError
 
-# Couleurs de l'interface
 CREME = "#F5EBDD"
 BEIGE = "#E8D5BE"
 CARAMEL = "#C7A98B"
@@ -24,588 +30,433 @@ CHOCOLAT = "#4E3528"
 BLANC = "#FFF9F1"
 
 
-def contient_audio_directement(directory):
-    """Vérifie si un dossier contient directement un MP3 ou un FLAC."""
-    try:
-        with os.scandir(directory) as elements:
-            return any(
-                element.is_file(follow_symlinks=False)
-                and is_supported_file(element.path)
-                for element in elements
-            )
-    except OSError:
-        return False
-
-
-class FolderSelector:
-    """Fenêtre de navigation dans les dossiers."""
-
-    def __init__(self, parent, on_select, initial_directory=None):
-        self.on_select = on_select
-        self.current_directory = initial_directory or os.path.expanduser("~")
-        self.folders = []
-
-        self.window = tk.Toplevel(parent)
-        self.window.title("Choisir un dossier")
-        self.window.geometry("600x520")
-        self.window.minsize(450, 400)
-        self.window.configure(bg=CREME)
-        self.window.transient(parent)
-        self.window.grab_set()
-
-        tk.Label(
-            self.window, text="Choisir un dossier", font=("Georgia", 19, "bold"),
-            bg=CREME, fg=CHOCOLAT
-        ).pack(pady=(25, 15))
-
-        # Navigation
-        navigation = tk.Frame(self.window, bg=BEIGE, padx=12, pady=12)
-        navigation.pack(fill="x", padx=25)
-
-        tk.Button(
-            navigation, text="← Retour", command=self.go_back,
-            bg=CARAMEL, fg=CHOCOLAT, relief="flat", cursor="hand2",
-            padx=12, pady=6
-        ).pack(side="left")
-
-        self.path_label = tk.Label(
-            navigation, text="", bg=BEIGE, fg=CHOCOLAT,
-            font=("Arial", 10), anchor="w", wraplength=340
-        )
-        self.path_label.pack(side="left", padx=12, fill="x", expand=True)
-
-        # Liste des dossiers
-        content = tk.Frame(self.window, bg=BLANC, padx=12, pady=12)
-        content.pack(fill="both", expand=True, padx=25, pady=15)
-
-        scrollbar = tk.Scrollbar(content)
-        scrollbar.pack(side="right", fill="y")
-
-        self.folder_list = tk.Listbox(
-            content, font=("Arial", 12), bg=BLANC, fg=CHOCOLAT,
-            selectbackground=MARRON, selectforeground=BLANC,
-            relief="flat", highlightthickness=0, activestyle="none",
-            yscrollcommand=scrollbar.set
-        )
-        self.folder_list.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.folder_list.yview)
-        self.folder_list.bind("<Double-Button-1>", self.open_folder)
-
-        tk.Label(
-            self.window, text="Caramel : contient directement des MP3 ou FLAC",
-            bg=CREME, fg=MARRON, font=("Arial", 10)
-        ).pack(pady=(0, 8))
-
-        buttons = tk.Frame(self.window, bg=CREME)
-        buttons.pack(pady=(0, 20))
-        tk.Button(
-            buttons, text="Annuler", command=self.window.destroy,
-            bg=BEIGE, fg=CHOCOLAT, relief="flat", cursor="hand2",
-            padx=22, pady=10
-        ).pack(side="left", padx=8)
-        tk.Button(
-            buttons, text="Sélectionner", command=self.select_folder,
-            bg=MARRON, fg=BLANC, relief="flat", cursor="hand2",
-            padx=22, pady=10
-        ).pack(side="left", padx=8)
-
-        self.refresh_folders()
-
-    def refresh_folders(self):
-        """Affiche les sous-dossiers et repère ceux contenant des musiques."""
-        self.folder_list.delete(0, tk.END)
-        self.path_label.config(text=self.current_directory)
-        try:
-            self.folders = sorted(
-                [
-                    name for name in os.listdir(self.current_directory)
-                    if os.path.isdir(os.path.join(self.current_directory, name))
-                ],
-                key=str.lower
-            )
-        except OSError as error:
-            self.folders = []
-            messagebox.showerror("Erreur", str(error), parent=self.window)
-            return
-
-        for index, folder in enumerate(self.folders):
-            path = os.path.join(self.current_directory, folder)
-            has_audio = contient_audio_directement(path)
-            self.folder_list.insert(tk.END, "  ›   " + folder)
-            if has_audio:
-                self.folder_list.itemconfig(index, bg=CARAMEL, fg=CHOCOLAT)
-
-    def open_folder(self, event=None):
-        """Ouvre le sous-dossier sélectionné."""
-        selection = self.folder_list.curselection()
-        if not selection:
-            return
-        self.current_directory = os.path.join(
-            self.current_directory, self.folders[selection[0]]
-        )
-        self.refresh_folders()
-
-    def go_back(self):
-        """Revient au dossier parent."""
-        parent_directory = os.path.dirname(self.current_directory)
-        if parent_directory != self.current_directory:
-            self.current_directory = parent_directory
-            self.refresh_folders()
-
-    def select_folder(self):
-        """Valide le dossier courant."""
-        directory = self.current_directory
-        self.window.destroy()
-        self.on_select(directory)
-
-
-class PlaylistSaveDialog:
-    """Fenêtre personnalisée d'enregistrement XSPF."""
-
-    def __init__(self, parent, on_save):
-        self.on_save = on_save
-        self.current_directory = os.getcwd()
-
-        self.window = tk.Toplevel(parent)
-        self.window.title("Enregistrer la playlist")
-        self.window.geometry("560x440")
-        self.window.minsize(480, 420)
-        self.window.configure(bg=CREME)
-        self.window.transient(parent)
-        self.window.grab_set()
-
-        tk.Label(
-            self.window, text="Enregistrer la playlist", font=("Georgia", 19, "bold"),
-            bg=CREME, fg=CHOCOLAT
-        ).pack(pady=(25, 20))
-
-        frame = tk.Frame(self.window, bg=BEIGE, padx=20, pady=20)
-        frame.pack(fill="x", padx=30)
-        tk.Label(
-            frame, text="Dossier de destination", font=("Arial", 11, "bold"),
-            bg=BEIGE, fg=CHOCOLAT
-        ).pack(anchor="w")
-
-        self.path_label = tk.Label(
-            frame, text=self.current_directory, font=("Arial", 10),
-            bg=BLANC, fg=CHOCOLAT, anchor="w", padx=10, pady=8,
-            wraplength=430
-        )
-        self.path_label.pack(fill="x", pady=(8, 12))
-
-        tk.Button(
-            frame, text="Changer de dossier", command=self.choose_directory,
-            bg=CARAMEL, fg=CHOCOLAT, relief="flat", cursor="hand2",
-            padx=12, pady=6
-        ).pack(anchor="w")
-
-        tk.Label(
-            self.window, text="Nom de la playlist", font=("Arial", 11, "bold"),
-            bg=CREME, fg=CHOCOLAT
-        ).pack(anchor="w", padx=30, pady=(18, 5))
-
-        self.filename_entry = tk.Entry(
-            self.window, font=("Arial", 11), bg=BLANC,
-            fg=CHOCOLAT, relief="flat"
-        )
-        self.filename_entry.pack(fill="x", padx=30, ipady=8)
-        self.filename_entry.insert(0, DEFAULT_PLAYLIST_NAME)
-
-        buttons = tk.Frame(self.window, bg=CREME)
-        buttons.pack(pady=20)
-        tk.Button(
-            buttons, text="Annuler", command=self.window.destroy,
-            bg=BEIGE, fg=CHOCOLAT, relief="flat", cursor="hand2",
-            padx=25, pady=9
-        ).pack(side="left", padx=8)
-        tk.Button(
-            buttons, text="Enregistrer", command=self.save,
-            bg=MARRON, fg=BLANC, relief="flat", cursor="hand2",
-            padx=25, pady=9
-        ).pack(side="left", padx=8)
-
-    def choose_directory(self):
-        """Sélectionne le dossier de destination."""
-        FolderSelector(self.window, self.set_directory, self.current_directory)
-
-    def set_directory(self, directory):
-        """Actualise le chemin de destination."""
-        self.current_directory = directory
-        self.path_label.config(text=directory)
-
-    def save(self):
-        """Valide le nom et l'emplacement du fichier."""
-        filename = self.filename_entry.get().strip()
-        if not filename or filename in (".", ".."):
-            messagebox.showwarning(
-                "Nom invalide", "Saisissez un nom de fichier valide.", parent=self.window
-            )
-            return
-        if os.path.basename(filename) != filename or "\\" in filename or "/" in filename:
-            messagebox.showwarning(
-                "Nom invalide", "Saisissez un nom sans chemin de dossier.", parent=self.window
-            )
-            return
-        if not filename.lower().endswith(".xspf"):
-            filename += ".xspf"
-
-        output_path = os.path.join(self.current_directory, filename)
-        if os.path.exists(output_path):
-            if not os.path.isfile(output_path):
-                messagebox.showerror(
-                    "Erreur", "Ce nom correspond déjà à un dossier.", parent=self.window
-                )
-                return
-            if not messagebox.askyesno(
-                "Fichier existant", "Cette playlist existe déjà. La remplacer ?",
-                parent=self.window
-            ):
-                return
-
-        self.window.destroy()
-        self.on_save(output_path)
-
-
-class PlaylistOpenDialog:
-    """Fenêtre personnalisée pour ouvrir une playlist XSPF."""
-
-    def __init__(self, parent, on_open):
-        self.on_open = on_open
-        self.current_directory = os.getcwd()
-        self.folders = []
-        self.playlists = []
-
-        self.window = tk.Toplevel(parent)
-        self.window.title("Ouvrir une playlist")
-        self.window.geometry("620x550")
-        self.window.minsize(480, 420)
-        self.window.configure(bg=CREME)
-        self.window.transient(parent)
-        self.window.grab_set()
-
-        tk.Label(
-            self.window, text="Ouvrir une playlist XSPF",
-            font=("Georgia", 19, "bold"), bg=CREME, fg=CHOCOLAT
-        ).pack(pady=(22, 14))
-
-        navigation = tk.Frame(self.window, bg=BEIGE, padx=12, pady=12)
-        navigation.pack(fill="x", padx=25)
-        tk.Button(
-            navigation, text="← Retour", command=self.go_back,
-            bg=CARAMEL, fg=CHOCOLAT, relief="flat", cursor="hand2",
-            padx=12, pady=6
-        ).pack(side="left")
-        self.path_label = tk.Label(
-            navigation, text="", bg=BEIGE, fg=CHOCOLAT,
-            font=("Arial", 10), anchor="w", wraplength=380
-        )
-        self.path_label.pack(side="left", padx=12, fill="x", expand=True)
-
-        content = tk.Frame(self.window, bg=BLANC, padx=12, pady=12)
-        content.pack(fill="both", expand=True, padx=25, pady=15)
-        scrollbar = tk.Scrollbar(content)
-        scrollbar.pack(side="right", fill="y")
-        self.items_list = tk.Listbox(
-            content, font=("Arial", 11), bg=BLANC, fg=CHOCOLAT,
-            selectbackground=CARAMEL, selectforeground=CHOCOLAT,
-            relief="flat", highlightthickness=0, activestyle="none",
-            yscrollcommand=scrollbar.set
-        )
-        self.items_list.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.items_list.yview)
-        self.items_list.bind("<Double-Button-1>", self.open_selected)
-
-        tk.Label(
-            self.window, text="Double-cliquez sur un dossier ou une playlist.",
-            bg=CREME, fg=MARRON, font=("Arial", 10)
-        ).pack(pady=(0, 8))
-
-        buttons = tk.Frame(self.window, bg=CREME)
-        buttons.pack(pady=(0, 20))
-        tk.Button(
-            buttons, text="Annuler", command=self.window.destroy,
-            bg=BEIGE, fg=CHOCOLAT, relief="flat", cursor="hand2",
-            padx=22, pady=10
-        ).pack(side="left", padx=8)
-        tk.Button(
-            buttons, text="Ouvrir", command=self.open_selected,
-            bg=MARRON, fg=BLANC, relief="flat", cursor="hand2",
-            padx=22, pady=10
-        ).pack(side="left", padx=8)
-        self.refresh_items()
-
-    def refresh_items(self):
-        """Affiche les sous-dossiers et les fichiers XSPF."""
-        self.items_list.delete(0, tk.END)
-        self.path_label.config(text=self.current_directory)
-        try:
-            names = os.listdir(self.current_directory)
-            self.folders = sorted(
-                [n for n in names if os.path.isdir(os.path.join(self.current_directory, n))],
-                key=str.lower
-            )
-            self.playlists = sorted(
-                [n for n in names if n.lower().endswith(".xspf")
-                 and os.path.isfile(os.path.join(self.current_directory, n))],
-                key=str.lower
-            )
-        except OSError as error:
-            self.folders, self.playlists = [], []
-            messagebox.showerror("Erreur", str(error), parent=self.window)
-            return
-
-        for folder in self.folders:
-            self.items_list.insert(tk.END, "  ›   " + folder)
-        for playlist in self.playlists:
-            index = self.items_list.size()
-            self.items_list.insert(tk.END, "  -   " + playlist)
-            self.items_list.itemconfig(index, bg=BEIGE, fg=CHOCOLAT)
-
-    def go_back(self):
-        """Revient au dossier parent."""
-        parent_directory = os.path.dirname(self.current_directory)
-        if parent_directory != self.current_directory:
-            self.current_directory = parent_directory
-            self.refresh_items()
-
-    def open_selected(self, event=None):
-        """Ouvre le dossier ou la playlist sélectionnée."""
-        selection = self.items_list.curselection()
-        if not selection:
-            return
-        index = selection[0]
-        if index < len(self.folders):
-            self.current_directory = os.path.join(
-                self.current_directory, self.folders[index]
-            )
-            self.refresh_items()
-            return
-
-        playlist_name = self.playlists[index - len(self.folders)]
-        playlist_path = os.path.join(self.current_directory, playlist_name)
-        self.window.destroy()
-        self.on_open(playlist_path)
+def friendly_error(error):
+    return str(error) or type(error).__name__
 
 
 class MusicGUI:
-    """Interface principale de la bibliothèque musicale."""
-
     def __init__(self, root):
         self.root = root
-        self.files = []
-        self.current_directory = None
-
-        self.root.title("Ma bibliothèque musicale")
-        self.root.geometry("1050x670")
-        self.root.minsize(850, 520)
+        self.root.title("Bibliothèque musicale MP3 / FLAC")
+        self.root.geometry("1170x760")
+        self.root.minsize(950, 620)
         self.root.configure(bg=CREME)
+        self.paths = []
+        self.directory = None
+        self.player = None
+        self.playing_index = None
+        self.paused = False
+        self.track_meta = {}
+        self.album_info = None
+        self.cover_photo = None
+        self.request_serial = 0
+        self.status_var = tk.StringVar(value="Choisissez un dossier ou ouvrez une playlist XSPF.")
+        self.now_var = tk.StringVar(value="Aucune lecture en cours")
+        self._configure_style()
+        self._build()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.after(500, self._poll_player)
 
-        tk.Label(
-            root, text="Ma bibliothèque musicale", font=("Georgia", 23, "bold"),
-            bg=CREME, fg=CHOCOLAT
-        ).pack(pady=(25, 15))
+    def _configure_style(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("TFrame", background=CREME)
+        style.configure("TLabel", background=CREME, foreground=CHOCOLAT, font=("Arial", 10))
+        style.configure("Title.TLabel", font=("Arial", 20, "bold"), background=CREME, foreground=CHOCOLAT)
+        style.configure("TButton", font=("Arial", 10, "bold"), padding=(10, 8), background=CARAMEL, foreground=CHOCOLAT)
+        style.map("TButton", background=[("active", BEIGE), ("disabled", BEIGE)])
+        style.configure("TNotebook", background=CREME)
+        style.configure("TNotebook.Tab", background=BEIGE, foreground=CHOCOLAT, padding=(12, 8))
+        style.map("TNotebook.Tab",
+                  background=[("selected", CARAMEL)],
+                  padding=[("selected", (12, 8))])
 
-        # Actions principales
-        button_frame = tk.Frame(root, bg=CREME)
-        button_frame.pack(pady=10)
-        tk.Button(
-            button_frame, text="Choisir un dossier", command=self.choose_directory,
-            font=("Arial", 11, "bold"), bg=MARRON, fg=BLANC,
-            activebackground=CHOCOLAT, activeforeground=BLANC,
-            relief="flat", cursor="hand2", padx=14, pady=10
-        ).pack(side="left", padx=6)
-        self.export_button = tk.Button(
-            button_frame, text="Enregistrer une playlist XSPF",
-            command=self.export_playlist, font=("Arial", 11, "bold"),
-            bg=CARAMEL, fg=CHOCOLAT, activebackground=MARRON,
-            activeforeground=BLANC, relief="flat", cursor="hand2",
-            padx=14, pady=10, state="disabled"
-        )
-        self.export_button.pack(side="left", padx=6)
-        tk.Button(
-            button_frame, text="Ouvrir une playlist XSPF",
-            command=self.choose_playlist, font=("Arial", 11, "bold"),
-            bg=BEIGE, fg=CHOCOLAT, activebackground=CARAMEL,
-            relief="flat", cursor="hand2", padx=14, pady=10
-        ).pack(side="left", padx=6)
+    def _build(self):
+        header = ttk.Frame(self.root)
+        header.pack(fill="x", padx=18, pady=(15, 8))
+        ttk.Label(header, text="Ma bibliothèque musicale", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(header, text="MP3 • FLAC • Playlists XSPF • Tags • Albums et paroles").pack(anchor="w", pady=(3, 0))
 
-        content = tk.Frame(root, bg=CREME)
-        content.pack(padx=30, pady=20, fill="both", expand=True)
+        actions = ttk.Frame(self.root)
+        actions.pack(fill="x", padx=18, pady=8)
+        ttk.Button(actions, text="Choisir un dossier", command=self.choose_folder).pack(side="left", padx=(0, 7))
+        ttk.Button(actions, text="Ouvrir une playlist", command=self.open_playlist_dialog).pack(side="left", padx=7)
+        ttk.Button(actions, text="Enregistrer en XSPF", command=self.save_playlist_dialog).pack(side="left", padx=7)
+        ttk.Button(actions, text="Actualiser", command=self.refresh).pack(side="left", padx=7)
 
-        # Liste des morceaux
-        left_frame = tk.Frame(content, bg=BEIGE, padx=15, pady=15)
-        left_frame.pack(side="left", fill="both", expand=True, padx=(0, 8))
-        tk.Label(
-            left_frame, text="Mes morceaux", font=("Georgia", 16, "bold"),
-            bg=BEIGE, fg=CHOCOLAT
-        ).pack(anchor="w", pady=(0, 12))
-        list_container = tk.Frame(left_frame, bg=BLANC)
-        list_container.pack(fill="both", expand=True)
-        scrollbar = tk.Scrollbar(list_container)
+        content = ttk.Panedwindow(self.root, orient="horizontal")
+        content.pack(fill="both", expand=True, padx=18, pady=8)
+        left = ttk.Frame(content)
+        right = ttk.Frame(content)
+        content.add(left, weight=2)
+        content.add(right, weight=3)
+
+        ttk.Label(left, text="Morceaux", font=("Arial", 12, "bold")).pack(anchor="w", pady=(0, 6))
+        listframe = ttk.Frame(left)
+        listframe.pack(fill="both", expand=True, padx=(0, 10))
+        self.listbox = tk.Listbox(listframe, bg=BLANC, fg=CHOCOLAT, selectbackground=MARRON,
+                                  selectforeground="white", font=("Arial", 10), relief="flat",
+                                  highlightthickness=1, highlightbackground=CARAMEL, exportselection=False)
+        scrollbar = ttk.Scrollbar(listframe, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        self.listbox.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        self.file_list = tk.Listbox(
-            list_container, bg=BLANC, fg=CHOCOLAT,
-            selectbackground=CARAMEL, selectforeground=CHOCOLAT,
-            font=("Arial", 11), relief="flat", highlightthickness=0,
-            activestyle="none", yscrollcommand=scrollbar.set
-        )
-        self.file_list.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.file_list.yview)
-        self.file_list.bind("<<ListboxSelect>>", self.show_metadata)
+        self.listbox.bind("<<ListboxSelect>>", self.show_selected)
+        self.listbox.bind("<Double-Button-1>", lambda event: self.play_selected())
 
-        # Informations du morceau
-        right_frame = tk.Frame(content, bg=BEIGE, padx=15, pady=15)
-        right_frame.pack(side="right", fill="both", expand=True, padx=(8, 0))
-        tk.Label(
-            right_frame, text="Informations du morceau",
-            font=("Georgia", 15, "bold"), bg=BEIGE, fg=CHOCOLAT
-        ).pack(anchor="w", pady=(0, 12))
-        metadata_container = tk.Frame(right_frame, bg=BLANC)
-        metadata_container.pack(fill="both", expand=True)
-        metadata_scrollbar = tk.Scrollbar(metadata_container)
-        metadata_scrollbar.pack(side="right", fill="y")
-        self.metadata_text = tk.Text(
-            metadata_container, bg=BLANC, fg=CHOCOLAT,
-            font=("Arial", 11), relief="flat", highlightthickness=0,
-            wrap="word", padx=15, pady=15,
-            yscrollcommand=metadata_scrollbar.set, state="disabled"
-        )
-        self.metadata_text.pack(side="left", fill="both", expand=True)
-        metadata_scrollbar.config(command=self.metadata_text.yview)
-        self.set_metadata_text("Sélectionnez un morceau")
+        controls = ttk.Frame(left)
+        controls.pack(fill="x", pady=10)
 
-        self.status = tk.Label(
-            root, text="Aucun dossier sélectionné", font=("Arial", 10),
-            bg=CREME, fg=MARRON
-        )
-        self.status.pack(pady=(0, 20))
+        for label, fn in (("Lecture", self.play_selected), ("Pause", self.pause),
+                          ("Reprendre", self.resume), ("Stop", self.stop)):
+            ttk.Button(
+                controls,
+                text=label,
+                command=fn,
+                width=9
+            ).pack(side="left", padx=(0, 5))
 
-    def set_metadata_text(self, text):
-        """Actualise le panneau des métadonnées."""
-        self.metadata_text.config(state="normal")
-        self.metadata_text.delete("1.0", tk.END)
-        self.metadata_text.insert("1.0", text)
-        self.metadata_text.config(state="disabled")
-        self.metadata_text.yview_moveto(0)
+        ttk.Label(left, textvariable=self.now_var, wraplength=370).pack(anchor="w", pady=(0, 5))
 
-    def set_files(self, files):
-        """Actualise la liste des morceaux affichés."""
-        self.files = list(files)
-        self.file_list.delete(0, tk.END)
-        self.set_metadata_text("Sélectionnez un morceau")
-        for path in self.files:
-            self.file_list.insert(tk.END, "  -  " + os.path.basename(path))
-        self.export_button.config(state="normal" if self.files else "disabled")
+        self.notebook = ttk.Notebook(right)
+        self.notebook.pack(fill="both", expand=True)
+        meta_tab = ttk.Frame(self.notebook)
+        album_tab = ttk.Frame(self.notebook)
+        self.notebook.add(meta_tab, text="Métadonnées")
+        self.notebook.add(album_tab, text="Album et paroles")
 
-    def choose_directory(self):
-        """Ouvre la fenêtre de sélection des dossiers."""
-        FolderSelector(self.root, self.load_directory)
+        meta_toolbar = ttk.Frame(meta_tab)
+        meta_toolbar.pack(fill="x", pady=(8, 5), padx=8)
+        ttk.Button(meta_toolbar, text="Modifier les tags", command=self.edit_tags).pack(side="left")
+        self.meta_text = self._text_area(meta_tab)
+        self._set_text(self.meta_text, "Sélectionnez un morceau pour afficher ses métadonnées.")
 
-    def load_directory(self, directory):
-        """Recherche les musiques dans un dossier."""
+        album_toolbar = ttk.Frame(album_tab)
+        album_toolbar.pack(fill="x", pady=(8, 5), padx=8)
+        self.album_btn = ttk.Button(album_toolbar, text="Rechercher l'album", command=self.search_album)
+        self.album_btn.pack(side="left", padx=(0, 8))
+        ttk.Button(album_toolbar, text="Ouvrir la pochette", command=self.open_cover).pack(side="left")
+        self.album_text = self._text_area(album_tab)
+        self._set_text(self.album_text, "Sélectionnez un morceau, puis cliquez sur « Rechercher l'album ».\nLa recherche des paroles peut prendre du temps.")
+
+        status = tk.Label(self.root, textvariable=self.status_var, bg=BEIGE, fg=CHOCOLAT,
+                          anchor="w", padx=14, pady=9)
+        status.pack(fill="x", side="bottom")
+
+    def _text_area(self, parent):
+        frame = ttk.Frame(parent)
+        frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        widget = tk.Text(frame, wrap="word", bg=BLANC, fg=CHOCOLAT, relief="flat",
+                         font=("Arial", 10), padx=12, pady=12, state="disabled")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=widget.yview)
+        widget.configure(yscrollcommand=scroll.set)
+        widget.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        return widget
+
+    @staticmethod
+    def _set_text(widget, text):
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
+
+    def selected_index(self):
+        selection = self.listbox.curselection()
+        return selection[0] if selection else None
+
+    def selected_path(self):
+        index = self.selected_index()
+        return self.paths[index] if index is not None and index < len(self.paths) else None
+
+    def _set_files(self, paths, description):
+        self.stop()
+        self.paths = list(paths)
+        self.track_meta.clear()
+        self.album_info = None
+        self.cover_photo = None
+        self.request_serial += 1
+        self.listbox.delete(0, "end")
+        for path in self.paths:
+            self.listbox.insert("end", os.path.basename(path))
+        self._set_text(self.meta_text, "Sélectionnez un morceau pour afficher ses métadonnées.")
+        self._set_text(self.album_text, "Sélectionnez un morceau pour rechercher son album.")
+        self.status_var.set(f"{description} — {len(self.paths)} morceau(x)")
+        if self.paths:
+            self.listbox.selection_set(0)
+            self.show_selected()
+
+    def choose_folder(self):
+        folder = filedialog.askdirectory(parent=self.root, title="Choisir un dossier de musique", initialdir=self.directory or str(Path.home()))
+        if folder:
+            self.load_directory(folder)
+
+    def load_directory(self, folder):
         try:
-            files = scan_directory(directory)
-        except Exception as error:
-            messagebox.showerror("Erreur", str(error), parent=self.root)
+            if hasattr(explorer, "explore"):
+                result = explorer.explore(folder)
+                paths = result.files
+                rejected = getattr(result, "rejected", [])
+                errors = getattr(result, "errors", [])
+            else:
+                paths = explorer.scan_directory(folder)
+                rejected = []
+                errors = []
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Exploration impossible", friendly_error(exc), parent=self.root)
             return
-        self.current_directory = directory
-        self.set_files(files)
-        self.status.config(text=f"{len(files)} morceau(x) trouvé(s)")
-        if not files:
-            self.set_metadata_text("Aucun fichier MP3 ou FLAC trouvé.")
+        self.directory = folder
+        self._set_files(paths, f"Dossier : {folder}")
+        if errors or rejected:
+            self.status_var.set(f"{len(paths)} morceau(x) • {len(rejected)} fichier(s) rejeté(s) • {len(errors)} erreur(s) de parcours")
+        if not paths:
+            messagebox.showinfo("Aucun fichier audio", "Aucun MP3/FLAC valide trouvé dans ce dossier.", parent=self.root)
 
-    def show_metadata(self, event=None):
-        """Affiche les informations du morceau sélectionné."""
-        selection = self.file_list.curselection()
-        if not selection or selection[0] >= len(self.files):
-            return
+    def refresh(self):
+        if self.directory:
+            self.load_directory(self.directory)
+        else:
+            self.status_var.set("Ouvrez un dossier pour actualiser son contenu.")
+
+    def open_playlist_dialog(self):
+        path = filedialog.askopenfilename(parent=self.root, title="Ouvrir une playlist XSPF",
+                                          filetypes=[("Playlists XSPF", "*.xspf"), ("Tous les fichiers", "*.*")])
+        if path:
+            self.open_playlist(path)
+
+    def open_playlist(self, path):
         try:
-            metadata = extract_metadata(self.files[selection[0]])
-            informations = (
-                f"Titre : {metadata.title or '-'}\n\n"
-                f"Artiste : {metadata.artist or '-'}\n\n"
-                f"Album : {metadata.album or '-'}\n\n"
-                f"Artiste album : {metadata.album_artist or '-'}\n\n"
-                f"Date : {metadata.date or '-'}\n\n"
-                f"Genre : {metadata.genre or '-'}\n\n"
-                f"Piste n° : {metadata.track_number or '-'}\n\n"
-                f"Durée : {metadata.duration_str}\n\n"
-                f"Format : {metadata.format}\n\n"
-                f"Débit : {metadata.bitrate // 1000} kbit/s\n\n"
-                f"Fréquence : {metadata.sample_rate} Hz\n\n"
-                f"Canaux : {metadata.channels}\n\n"
-                f"Pochette : {'Oui' if metadata.has_cover else 'Non'}\n\n"
-                f"Chemin : {metadata.path}"
-            )
-            self.set_metadata_text(informations)
-        except MetadataError as error:
-            self.set_metadata_text("Impossible de lire les métadonnées.")
-            messagebox.showerror("Erreur de lecture", str(error), parent=self.root)
-
-    def choose_playlist(self):
-        """Ouvre le sélecteur de playlists."""
-        PlaylistOpenDialog(self.root, self.open_playlist)
-
-    def open_playlist(self, playlist_path):
-        """Charge les morceaux référencés dans un fichier XSPF."""
-        try:
-            paths = load_playlist(playlist_path)
-        except Exception as error:
-            messagebox.showerror("Playlist invalide", str(error), parent=self.root)
+            raw_paths = load_playlist(path)
+        except Exception as exc:
+            messagebox.showerror("Playlist invalide", friendly_error(exc), parent=self.root)
             return
-
-        available = [path for path in paths if os.path.isfile(path)]
+        # Résout les chemins relatifs, sans changer le module playlist.py du groupe.
+        base = os.path.dirname(os.path.abspath(path))
+        paths = []
+        for item in raw_paths:
+            if item.startswith("file://"):
+                from urllib.parse import unquote, urlparse
+                item = unquote(urlparse(item).path)
+            if not os.path.isabs(item):
+                item = os.path.join(base, item)
+            paths.append(os.path.normpath(item))
+        available = [p for p in paths if os.path.isfile(p)]
         missing = len(paths) - len(available)
-        self.current_directory = None
-        self.set_files(available)
-        self.status.config(
-            text=f"Playlist : {os.path.basename(playlist_path)} — "
-                 f"{len(available)} morceau(x) disponible(s)"
-        )
-        if not available:
-            self.set_metadata_text("Aucun morceau accessible dans cette playlist.")
+        self.directory = None
+        self._set_files(available, f"Playlist : {os.path.basename(path)}")
         if missing:
-            messagebox.showwarning(
-                "Fichiers introuvables",
-                f"{missing} morceau(x) de la playlist sont introuvables.",
-                parent=self.root
-            )
+            messagebox.showwarning("Fichiers manquants", f"{missing} morceau(x) de cette playlist sont introuvables.\n\nLes chemins enregistrés peuvent provenir d'un autre ordinateur ou système (Windows / WSL).", parent=self.root)
+        if not paths:
+            messagebox.showinfo("Playlist vide", "Ce fichier XSPF ne contient aucune piste.", parent=self.root)
 
-    def export_playlist(self):
-        """Ouvre la fenêtre d'enregistrement XSPF."""
-        if not self.files:
-            messagebox.showwarning(
-                "Aucune musique", "Choisissez un dossier ou ouvrez une playlist.",
-                parent=self.root
-            )
+    def save_playlist_dialog(self):
+        if not self.paths:
+            messagebox.showinfo("Playlist vide", "Chargez d'abord des morceaux.", parent=self.root)
             return
-        PlaylistSaveDialog(self.root, self.save_xspf)
-
-    def save_xspf(self, output_path):
-        """Enregistre les morceaux affichés dans un fichier XSPF."""
+        path = filedialog.asksaveasfilename(parent=self.root, title="Enregistrer la playlist",
+                                             defaultextension=".xspf", initialfile="ma_playlist.xspf",
+                                             filetypes=[("Playlists XSPF", "*.xspf")])
+        if not path:
+            return
+        tracks, errors = tracks_from_paths(self.paths)
+        if not tracks:
+            messagebox.showerror("Enregistrement impossible", "Aucun morceau lisible à enregistrer.", parent=self.root)
+            return
         try:
-            tracks, errors = tracks_from_paths(self.files)
-            if not tracks:
-                messagebox.showerror(
-                    "Erreur", "Aucun morceau valide pour créer la playlist.",
-                    parent=self.root
-                )
+            save_playlist(tracks, path, title=Path(path).stem)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Enregistrement impossible", friendly_error(exc), parent=self.root)
+            return
+        self.status_var.set(f"Playlist enregistrée : {path} ({len(tracks)} piste(s))")
+        if errors:
+            messagebox.showwarning("Morceaux ignorés", f"{len(errors)} fichier(s) illisible(s) n'ont pas été ajoutés.", parent=self.root)
+
+    def _metadata_for(self, path):
+        if path not in self.track_meta:
+            self.track_meta[path] = extract_metadata(path)
+        return self.track_meta[path]
+
+    def show_selected(self, event=None):
+        path = self.selected_path()
+        if not path:
+            return
+        try:
+            meta = self._metadata_for(path)
+        except MetadataError as exc:
+            self._set_text(self.meta_text, friendly_error(exc))
+            return
+        self._set_text(self.meta_text, str(meta) + f"\nChemin complet : {meta.path}")
+
+    def _ensure_player(self):
+        if self.player is None:
+            self.player = AudioPlayer()
+        return self.player
+
+    def play_selected(self):
+        path = self.selected_path()
+        if not path:
+            messagebox.showinfo("Lecture", "Sélectionnez d'abord un morceau.", parent=self.root)
+            return
+        try:
+            extract_metadata(path)
+            self._ensure_player().play(path)
+        except (PlayerError, MetadataError, OSError) as exc:
+            messagebox.showerror("Lecture impossible", friendly_error(exc), parent=self.root)
+            return
+        self.playing_index = self.selected_index()
+        self.paused = False
+        self.now_var.set(f"Lecture : {os.path.basename(path)}")
+
+    def pause(self):
+        if self.player and self.playing_index is not None and not self.paused:
+            self.player.pause()
+            self.paused = True
+            self.now_var.set("Lecture en pause")
+
+    def resume(self):
+        if self.player and self.playing_index is not None and self.paused:
+            self.player.resume()
+            self.paused = False
+            self.now_var.set(f"Lecture : {os.path.basename(self.paths[self.playing_index])}")
+
+    def stop(self):
+        if self.player:
+            self.player.stop()
+        self.playing_index = None
+        self.paused = False
+        self.now_var.set("Aucune lecture en cours")
+
+    def _poll_player(self):
+        # Enchaîne les morceaux sans bloquer l'interface Tkinter.
+        try:
+            if self.player and self.playing_index is not None and not self.paused and not self.player.is_playing():
+                next_index = self.playing_index + 1
+                if next_index < len(self.paths):
+                    self.listbox.selection_clear(0, "end")
+                    self.listbox.selection_set(next_index)
+                    self.listbox.see(next_index)
+                    self.show_selected()
+                    self.play_selected()
+                else:
+                    self.stop()
+        except Exception as exc:
+            self.stop()
+            self.status_var.set(f"Erreur de lecture : {friendly_error(exc)}")
+        finally:
+            self.root.after(500, self._poll_player)
+
+    def edit_tags(self):
+        path = self.selected_path()
+        if not path:
+            messagebox.showinfo("Tags", "Sélectionnez d'abord un morceau.", parent=self.root)
+            return
+        try:
+            meta = self._metadata_for(path)
+        except MetadataError as exc:
+            messagebox.showerror("Tags", friendly_error(exc), parent=self.root)
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Modifier les métadonnées")
+        dialog.configure(bg=CREME)
+        dialog.geometry("540x490")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        ttk.Label(dialog, text=os.path.basename(path), font=("Arial", 12, "bold"), wraplength=480).pack(pady=14)
+        form = ttk.Frame(dialog)
+        form.pack(fill="both", expand=True, padx=22)
+        entries = {}
+        for row, (key, value) in enumerate(current_tags(meta).items()):
+            ttk.Label(form, text=TAG_LABELS.get(key, key)).grid(row=row, column=0, sticky="w", pady=6)
+            entry = ttk.Entry(form, width=45)
+            entry.insert(0, value)
+            entry.grid(row=row, column=1, sticky="ew", padx=(12, 0), pady=6)
+            entries[key] = entry
+        form.columnconfigure(1, weight=1)
+
+        def save():
+            old = current_tags(meta)
+            changes = {key: widget.get().strip() for key, widget in entries.items()
+                       if widget.get().strip() != old[key]}
+            if not changes:
+                dialog.destroy()
                 return
-            save_playlist(tracks, output_path, title="Ma bibliothèque musicale")
-            message = (
-                f"Playlist enregistrée avec succès !\n\n"
-                f"{len(tracks)} morceau(x) ajouté(s).\n\n"
-                f"Fichier : {output_path}"
-            )
-            if errors:
-                message += f"\n\n{len(errors)} fichier(s) n'ont pas pu être lus."
-            messagebox.showinfo("Playlist enregistrée", message, parent=self.root)
-            self.status.config(text=f"Playlist XSPF créée : {len(tracks)} morceau(x)")
-        except (OSError, ValueError) as error:
-            messagebox.showerror("Erreur d'export", str(error), parent=self.root)
+            if self.playing_index is not None and self.paths[self.playing_index] == path:
+                self.stop()
+            try:
+                updated = write_tags(path, changes)
+            except (TagError, MetadataError, OSError) as exc:
+                messagebox.showerror("Écriture impossible", friendly_error(exc), parent=dialog)
+                return
+            self.track_meta[path] = updated
+            self.show_selected()
+            self.status_var.set(f"Tags enregistrés : {os.path.basename(path)}")
+            dialog.destroy()
+        ttk.Button(dialog, text="Enregistrer les modifications", command=save).pack(pady=14)
+
+    def search_album(self):
+        path = self.selected_path()
+        if not path:
+            messagebox.showinfo("Album", "Sélectionnez d'abord un morceau.", parent=self.root)
+            return
+        try:
+            meta = self._metadata_for(path)
+        except MetadataError as exc:
+            messagebox.showerror("Album", friendly_error(exc), parent=self.root)
+            return
+        if not meta.album:
+            messagebox.showwarning("Album inconnu", "Le morceau ne possède pas de tag album. Vous pouvez le renseigner avec « Modifier les tags ».", parent=self.root)
+            return
+        self.request_serial += 1
+        serial = self.request_serial
+        self.album_btn.configure(state="disabled")
+        self._set_text(self.album_text, f"Recherche de « {meta.album} »…\nTéléchargement des informations et des paroles, veuillez patienter.")
+
+        def worker():
+            try:
+                info = fetch_album_info(meta.album_artist or meta.artist, meta.album, with_lyrics=True)
+                result = (info, None)
+            except Exception as exc:
+                result = (None, exc)
+            self.root.after(0, lambda: self._album_result(serial, *result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _album_result(self, serial, info, error):
+        if serial != self.request_serial:
+            return
+        self.album_btn.configure(state="normal")
+        if error:
+            self._set_text(self.album_text, f"Recherche impossible : {friendly_error(error)}")
+            return
+        self.album_info = info
+        lines = [str(info), "", "PAROLES", "=" * 35]
+        for track in info.tracks:
+            lines.extend(["", f"{track.position}. {track.title}", "-" * 30,
+                          track.lyrics or "(Paroles introuvables)"])
+        self._set_text(self.album_text, "\n".join(lines))
+        self.status_var.set(f"Album trouvé : {info.title} — {len(info.tracks)} piste(s)")
+
+    def open_cover(self):
+        if not self.album_info or not self.album_info.cover_url:
+            messagebox.showinfo("Pochette", "Aucune pochette disponible. Recherchez d'abord un album.", parent=self.root)
+            return
+        webbrowser.open(self.album_info.cover_url)
+
+    def close(self):
+        self.request_serial += 1
+        if self.player:
+            try:
+                self.player.close()
+            except Exception:
+                pass
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    MusicGUI(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = MusicGUI(root)
-    root.mainloop()
+    main()
