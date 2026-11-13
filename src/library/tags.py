@@ -10,6 +10,8 @@ import os
 
 import mutagen
 
+from .metadata import extract_metadata
+
 # Nom utilisé en ligne de commande -> nom du tag dans mutagen
 TAGS = {
     "titre": "title",
@@ -19,6 +21,17 @@ TAGS = {
     "date": "date",
     "genre": "genre",
     "piste": "tracknumber",
+}
+
+# Libellés affichés dans la fenêtre « Modifier les tags » de l'interface graphique
+TAG_LABELS = {
+    "titre": "Titre",
+    "artiste": "Artiste",
+    "album": "Album",
+    "artiste_album": "Artiste album",
+    "date": "Date",
+    "genre": "Genre",
+    "piste": "Piste n°",
 }
 
 
@@ -104,3 +117,24 @@ def lire_options_s(liste):
         nom, valeur = element.split("=", 1)
         changements[nom.strip().lower()] = valeur.strip()
     return changements
+
+
+# ----- Fonctions utilisées par l'interface graphique -----
+
+def current_tags(meta):
+    """Valeurs actuelles des tags, à partir des métadonnées lues par metadata.py."""
+    return {
+        "titre": meta.title,
+        "artiste": meta.artist,
+        "album": meta.album,
+        "artiste_album": meta.album_artist,
+        "date": meta.date,
+        "genre": meta.genre,
+        "piste": meta.track_number,
+    }
+
+
+def write_tags(path, changements):
+    """Modifie les tags puis renvoie les métadonnées relues dans le fichier."""
+    modifier_tags(path, changements)
+    return extract_metadata(path)

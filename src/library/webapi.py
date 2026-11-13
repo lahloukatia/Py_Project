@@ -93,3 +93,52 @@ def chercher_paroles(artiste, titre):
     if data.get("instrumental"):
         return "[Instrumental]"
     return data.get("plainLyrics")
+
+
+# ----- Version objet, utilisée par l'interface graphique -----
+
+class Piste:
+    """Une piste de l'album."""
+
+    def __init__(self, piste):
+        self.position = piste["numero"]
+        self.title = piste["titre"]
+        self.duration = piste["duree"]
+        self.lyrics = None
+
+
+class InfosAlbum:
+    """Les infos d'un album : mêmes données que le dictionnaire de chercher_album."""
+
+    def __init__(self, infos):
+        self.title = infos["titre"]
+        self.artist = infos["artiste"]
+        self.date = infos["date"]
+        self.country = infos["pays"]
+        self.label = infos["label"]
+        self.cover_url = infos["pochette"]
+        self.tracks = [Piste(p) for p in infos["pistes"]]
+
+    def __str__(self):
+        lignes = [
+            f"Album    : {self.title}",
+            f"Artiste  : {self.artist}",
+            f"Date     : {self.date or '-'}",
+            f"Pays     : {self.country or '-'}",
+            f"Label    : {self.label or '-'}",
+            f"Pochette : {self.cover_url}",
+            f"Pistes   : {len(self.tracks)}",
+        ]
+        for piste in self.tracks:
+            minutes, secondes = divmod(piste.duration, 60)
+            lignes.append(f"  {piste.position:>2}. {piste.title} [{minutes}:{secondes:02d}]")
+        return "\n".join(lignes)
+
+
+def fetch_album_info(artiste, album, with_lyrics=True):
+    """Cherche l'album et renvoie un objet InfosAlbum (avec les paroles si demandé)."""
+    info = InfosAlbum(chercher_album(artiste, album))
+    if with_lyrics:
+        for piste in info.tracks:
+            piste.lyrics = chercher_paroles(info.artist, piste.title)
+    return info
