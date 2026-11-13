@@ -22,8 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from library.explorer import explore  # noqa: E402
 from library.metadata import MetadataError, extract_metadata  # noqa: E402
-from library.tags import TAG_LABELS, TagError, current_tags, parse_assignments, write_tags  # noqa: E402
-from library.webapi import WebApiError, fetch_album_info  # noqa: E402
+from library.tags import TagError, lire_options_s, lire_tags, modifier_tags  # noqa: E402
+from library.webapi import WebApiError, chercher_album, chercher_paroles  # noqa: E402
 from library.playlist import DEFAULT_PLAYLIST_NAME, save_playlist, tracks_from_paths  # noqa: E402
 from library.player import PlayerError, play_file, play_playlist  # noqa: E402
 
@@ -47,8 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("-p", "--play", metavar="FICHIER",
                         help="écouter un fichier MP3/FLAC ou une playlist .xspf enregistrée")
     parser.add_argument("-s", "--set", metavar="CLE=VALEUR", action="append",
-                        help="tag à modifier avec -e (répétable). Clés : titre, artiste, album, "
-                             "artiste_album, date, genre, piste. Valeur vide = suppression")
+                        help="tag à modifier avec -e (on peut en mettre plusieurs). Clés : titre, "
+                             "artiste, album, artiste_album, date, genre, piste. Valeur vide = suppression")
     parser.add_argument("--no-lyrics", action="store_true",
                         help="avec -a : ne pas télécharger les paroles")
     parser.add_argument("-o", "--output", metavar="FICHIER.xspf",
@@ -93,66 +93,76 @@ def run_directory(directory: str, output: str | None) -> int:
     return 0
 
 
-def ask_tags_interactively(path: str) -> dict:
-    """Demande chaque tag à l'utilisateur. Entrée = garder, « - » = supprimer."""
-    meta = extract_metadata(path)
+def demander_tags(path):
+    """Mode interactif de -e : on demande chaque tag à l'utilisateur.
+    Entrée = garder la valeur actuelle, « - » = supprimer le tag."""
     print(f"Édition des tags de {path}")
     print("(Entrée = garder la valeur actuelle, « - » = supprimer le tag)\n")
-    changes = {}
-    for key, value in current_tags(meta).items():
-        answer = input(f"{TAG_LABELS[key]:<14}[{value}] : ").strip()
-        if answer == "-":
-            changes[key] = ""
-        elif answer and answer != value:
-            changes[key] = answer
-    return changes
+    changements = {}
+    for nom, valeur in lire_tags(path).items():
+        reponse = input(f"{nom} [{valeur}] : ").strip()
+        if reponse == "-":
+            changements[nom] = ""
+        elif reponse != "":
+            changements[nom] = reponse
+    return changements
 
 
-def run_edit(path: str, assignments: list[str] | None) -> int:
-    """Option -e : modifie les tags avec les valeurs de -s, ou en mode interactif sans -s.
-
-    Renvoie 0 si tout s'est bien passé, 1 en cas d'erreur ou d'annulation.
-    """
+def run_edit(path, options_s):
+    """Option -e : modifie les tags avec les valeurs de -s, ou en mode interactif sans -s."""
     try:
-        changes = parse_assignments(assignments) if assignments else ask_tags_interactively(path)
-        if not changes:
+        if options_s:
+            changements = lire_options_s(options_s)
+        else:
+            changements = demander_tags(path)
+
+        if not changements:
             print("Aucune modification.")
             return 0
-        meta = write_tags(path, changes)
-    except (TagError, MetadataError) as exc:
-        print(f"Erreur : {exc}", file=sys.stderr)
+        modifier_tags(path, changements)
+        print("\nTags enregistrés :\n")
+        print(extract_metadata(path))     # on relit le fichier pour vérifier
+    except (TagError, MetadataError) as e:
+        print(f"Erreur : {e}", file=sys.stderr)
         return 1
     except (KeyboardInterrupt, EOFError):
         print("\nÉdition annulée, fichier inchangé.")
         return 1
-    print("\nTags enregistrés :\n")
-    print(meta)
     return 0
 
 
-def run_album(path: str, with_lyrics: bool) -> int:
-    """Option -a : lit l'artiste et l'album dans les tags du fichier, interroge les API Web
-    et affiche les informations de l'album puis les paroles de chaque morceau.
-
-    Renvoie 0 si tout s'est bien passé, 1 en cas d'erreur (tag album absent, réseau...).
-    """
+def run_album(path, avec_paroles):
+    """Option -a : lit l'album et l'artiste dans les tags du fichier,
+    puis affiche les infos de l'album trouvées sur Internet (et les paroles)."""
     try:
         meta = extract_metadata(path)
         if not meta.album:
-            print("Erreur : ce fichier n'a pas de tag « album ». "
+            print("Erreur : ce fichier n'a pas de tag album. "
                   "Ajoutez-le avec : python3 cli.py -e FICHIER -s album=\"...\"", file=sys.stderr)
             return 1
-        print(f"Recherche de « {meta.album} » ({meta.artist or 'artiste inconnu'})...\n")
-        info = fetch_album_info(meta.album_artist or meta.artist, meta.album, with_lyrics)
-    except (MetadataError, WebApiError) as exc:
-        print(f"Erreur : {exc}", file=sys.stderr)
+        artiste = meta.album_artist or meta.artist
+        print(f"Recherche de {meta.album} ({artiste or 'artiste inconnu'})...\n")
+        album = chercher_album(artiste, meta.album)
+    except (MetadataError, WebApiError) as e:
+        print(f"Erreur : {e}", file=sys.stderr)
         return 1
 
-    print(info)
-    if with_lyrics:
-        for track in info.tracks:
-            print(f"\n--- {track.position}. {track.title} ---")
-            print(track.lyrics or "(paroles introuvables)")
+    print(f"Album    : {album['titre']}")
+    print(f"Artiste  : {album['artiste']}")
+    print(f"Date     : {album['date'] or '-'}")
+    print(f"Pays     : {album['pays'] or '-'}")
+    print(f"Label    : {album['label'] or '-'}")
+    print(f"Pochette : {album['pochette']}")
+    print(f"Pistes   : {len(album['pistes'])}")
+    for piste in album["pistes"]:
+        minutes, secondes = divmod(piste["duree"], 60)
+        print(f"  {piste['numero']:>2}. {piste['titre']} [{minutes}:{secondes:02d}]")
+
+    if avec_paroles:
+        for piste in album["pistes"]:
+            print(f"\n--- {piste['numero']}. {piste['titre']} ---")
+            paroles = chercher_paroles(album["artiste"], piste["titre"])
+            print(paroles or "(paroles introuvables)")
     return 0
 
 
